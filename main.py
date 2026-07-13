@@ -65,6 +65,7 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 STUDENTS_TABLE = "students"
 PROFILES_TABLE = "profiles"
 DEVICES_TABLE = "devices"
+IMAGES_BUCKET = "IMAGES"
 STUDENT_COUNT_RANGES = ["<250", "250-500", "500-1000", "1000-3000", "3000+"]
 
 # Excel imports are a two-step flow (analyze, then commit) so the confirmation
@@ -997,6 +998,24 @@ DASHBOARD_PAGE = page_shell(
 
   .modal.wide{ max-width:30rem; text-align:left; }
   .modal.wide h3{ text-align:center; }
+
+  .review-card{
+    max-width: 36rem; margin: 0 auto; text-align:center;
+    background: linear-gradient(160deg, var(--card), var(--card-2));
+    border: 1px solid var(--line); border-radius: 20px;
+    padding: 2.4rem;
+  }
+  .review-image-wrap{
+    position:relative; width:100%; aspect-ratio: 4 / 3;
+    background: rgba(255,255,255,0.03); border: 1px solid var(--line); border-radius: 14px;
+    overflow:hidden; display:flex; align-items:center; justify-content:center;
+  }
+  .review-image-wrap img{ width:100%; height:100%; object-fit:contain; }
+  .review-placeholder{ color: var(--muted); font-size:0.85rem; }
+  .review-name{ font-size:1.6rem; font-weight:800; letter-spacing:0.02em; margin:1.4rem 0 1rem; }
+  .review-nav{ display:flex; align-items:center; justify-content:center; gap:1.4rem; }
+  .review-arrow{ font-size:1.4rem; padding:0.6rem 1.3rem; }
+  .review-position{ color: var(--muted); font-size:0.9rem; min-width:3.5rem; }
 </style>
 
 <div class="dash-layout">
@@ -1009,6 +1028,9 @@ DASHBOARD_PAGE = page_shell(
     </button>
     <button type="button" class="nav-btn" data-view="devices">
       <span class="nav-icon">&#128225;</span> Device Manager
+    </button>
+    <button type="button" class="nav-btn" data-view="review">
+      <span class="nav-icon">&#128248;</span> Review
     </button>
   </div>
 
@@ -1081,6 +1103,22 @@ DASHBOARD_PAGE = page_shell(
               <tr class="empty-row"><td colspan="6">Loading devices&hellip;</td></tr>
             </tbody>
           </table>
+        </div>
+      </div>
+    </div>
+
+    <div class="view" id="reviewView">
+      <h1>Review</h1>
+      <div class="review-card">
+        <div class="review-image-wrap">
+          <img id="reviewImage" alt="" style="display:none;">
+          <div class="review-placeholder" id="reviewPlaceholder">Loading&hellip;</div>
+        </div>
+        <div class="review-name" id="reviewName">&mdash;</div>
+        <div class="review-nav">
+          <button type="button" class="btn btn-ghost review-arrow" id="reviewPrevBtn">&larr;</button>
+          <span class="review-position" id="reviewPosition"></span>
+          <button type="button" class="btn btn-ghost review-arrow" id="reviewNextBtn">&rarr;</button>
         </div>
       </div>
     </div>
@@ -1315,7 +1353,7 @@ DASHBOARD_PAGE = page_shell(
   // resetting to Home.
   var navButtons = document.querySelectorAll('.nav-btn');
   var views = document.querySelectorAll('.view');
-  var validViews = ['home', 'students', 'devices'];
+  var validViews = ['home', 'students', 'devices', 'review'];
 
   function switchToView(viewName, updateHash){
     if (validViews.indexOf(viewName) === -1) viewName = 'home';
@@ -1331,6 +1369,7 @@ DASHBOARD_PAGE = page_shell(
     if (viewName === 'home') loadStats();
     if (viewName === 'students') loadStudents();
     if (viewName === 'devices') loadDevices();
+    if (viewName === 'review') showReviewImage();
   }
 
   navButtons.forEach(function(btn){
@@ -1439,6 +1478,96 @@ DASHBOARD_PAGE = page_shell(
       tbody.innerHTML = '<tr class="empty-row"><td colspan="6">Could not reach the server.</td></tr>';
     });
   }
+
+  // ---------- Review gallery ----------
+  // Images are cached via the Cache Storage API as soon as the dashboard
+  // loads (not just when the Review tab is opened), so by the time someone
+  // actually clicks Review, every image renders instantly from cache
+  // instead of waiting on a fresh network fetch.
+  var IMAGE_CACHE_NAME = 'aar-review-images-v1';
+  var reviewImages = [];
+  var reviewIndex = 0;
+  var reviewImagesPromise = null;
+
+  function getReviewImages(){
+    if (!reviewImagesPromise){
+      reviewImagesPromise = authFetch('/api/gallery').then(function(r){ return r.json(); }).then(function(data){
+        return data.ok ? data.images : [];
+      }).catch(function(){ return []; });
+    }
+    return reviewImagesPromise;
+  }
+
+  function cacheReviewImages(images){
+    if (!window.caches) return;
+    caches.open(IMAGE_CACHE_NAME).then(function(cache){
+      images.forEach(function(item){
+        cache.match(item.url).then(function(existing){
+          if (existing) return;
+          fetch(item.url).then(function(res){
+            if (res.ok) cache.put(item.url, res.clone());
+          }).catch(function(){});
+        });
+      });
+    });
+  }
+
+  function renderReviewImage(url, imgEl){
+    if (!window.caches){
+      imgEl.src = url;
+      return;
+    }
+    caches.open(IMAGE_CACHE_NAME).then(function(cache){ return cache.match(url); }).then(function(cached){
+      if (cached){
+        return cached.blob().then(function(blob){ imgEl.src = URL.createObjectURL(blob); });
+      }
+      imgEl.src = url;
+      fetch(url).then(function(res){
+        if (res.ok) caches.open(IMAGE_CACHE_NAME).then(function(cache){ cache.put(url, res.clone()); });
+      }).catch(function(){});
+    });
+  }
+
+  function showReviewImage(){
+    var img = document.getElementById('reviewImage');
+    var placeholder = document.getElementById('reviewPlaceholder');
+    var nameEl = document.getElementById('reviewName');
+    var posEl = document.getElementById('reviewPosition');
+
+    getReviewImages().then(function(images){
+      reviewImages = images;
+      if (reviewImages.length === 0){
+        img.style.display = 'none';
+        placeholder.style.display = 'flex';
+        placeholder.textContent = 'No review images found.';
+        nameEl.textContent = '—';
+        posEl.textContent = '';
+        return;
+      }
+      if (reviewIndex >= reviewImages.length) reviewIndex = 0;
+      var item = reviewImages[reviewIndex];
+      placeholder.style.display = 'none';
+      img.style.display = 'block';
+      renderReviewImage(item.url, img);
+      nameEl.textContent = item.name;
+      posEl.textContent = (reviewIndex + 1) + ' / ' + reviewImages.length;
+    });
+  }
+
+  document.getElementById('reviewPrevBtn').addEventListener('click', function(){
+    if (reviewImages.length === 0) return;
+    reviewIndex = (reviewIndex - 1 + reviewImages.length) % reviewImages.length;
+    showReviewImage();
+  });
+  document.getElementById('reviewNextBtn').addEventListener('click', function(){
+    if (reviewImages.length === 0) return;
+    reviewIndex = (reviewIndex + 1) % reviewImages.length;
+    showReviewImage();
+  });
+
+  // Warm the cache immediately on login/dashboard load, regardless of which
+  // tab is currently active.
+  getReviewImages().then(cacheReviewImages);
 
   // ---------- Overlay helpers ----------
   function showOverlay(el){ el.classList.add('show'); }
@@ -1940,6 +2069,32 @@ async def dashboard_stats(institute_id: str = Depends(get_institute_id)):
         "students_registered": students_registered,
         "classes_count": classes_count,
     }
+
+
+# ---------- Dashboard: review gallery ----------
+# Reference images stored in a public Supabase Storage bucket, one file per
+# item (e.g. "ERASER.jpg"). Not institute-scoped - it's a shared catalog.
+@app.get("/api/gallery")
+async def list_gallery_images(institute_id: str = Depends(get_institute_id)):
+    def _list():
+        files = supabase.storage.from_(IMAGES_BUCKET).list()
+        images = []
+        for f in files:
+            filename = f.get("name", "")
+            if not filename or "." not in filename:
+                continue
+            display_name = filename.rsplit(".", 1)[0].upper()
+            url = supabase.storage.from_(IMAGES_BUCKET).get_public_url(filename)
+            images.append({"name": display_name, "url": url})
+        images.sort(key=lambda item: item["name"])
+        return images
+
+    try:
+        images = await asyncio.to_thread(_list)
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+
+    return {"ok": True, "images": images}
 
 
 # ---------- Dashboard: student management ----------
